@@ -14,6 +14,7 @@ const ALLOWED = [
   "progress",
   "reminderAt",
   "reminded",
+  "meetingId",
 ];
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
