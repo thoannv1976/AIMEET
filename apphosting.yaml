@@ -10,7 +10,7 @@ runConfig:
 env:
   # Project ID — App Hosting tự inject GOOGLE_CLOUD_PROJECT, ta map sang biến của app
   - variable: FIREBASE_PROJECT_ID
-    value: meet-c9a19
+    value: meet2-afb35
     availability:
       - BUILD
       - RUNTIME
