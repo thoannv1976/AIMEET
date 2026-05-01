@@ -4,6 +4,8 @@ import { extractTasksFromTranscript } from "@/lib/anthropic";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Allow up to 5 minutes for AI extraction on long transcripts.
+export const maxDuration = 300;
 
 export async function GET() {
   const db = getDb();

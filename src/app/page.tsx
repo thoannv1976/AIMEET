@@ -46,8 +46,19 @@ export default function HomePage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title, transcript, date: new Date().toISOString() }),
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Lỗi xử lý");
+      const text = await r.text();
+      let data: any = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        // Non-JSON body (e.g. proxy timeout HTML) — surface raw text.
+      }
+      if (!r.ok) {
+        const detail = data?.detail ? ` (${data.detail})` : "";
+        const msg = data?.error || text?.slice(0, 300) || `HTTP ${r.status}`;
+        throw new Error(`${msg}${detail}`);
+      }
+      if (!data) throw new Error("Server trả về phản hồi rỗng — có thể request bị timeout. Thử lại với transcript ngắn hơn.");
       setResult(data);
       loadStats();
     } catch (e: any) {

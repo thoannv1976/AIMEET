@@ -1,11 +1,14 @@
 # Firebase App Hosting runtime config.
 # Docs: https://firebase.google.com/docs/app-hosting/configure
 runConfig:
-  cpu: 1
-  memoryMiB: 512
+  cpu: 2
+  memoryMiB: 1024
   maxInstances: 5
   minInstances: 0
-  concurrency: 80
+  concurrency: 40
+  # Anthropic Claude calls with max_tokens=4096 can take 30–90 s.
+  # Default App Hosting timeoutSeconds is 60 s — bump it to 5 min.
+  timeoutSeconds: 300
 
 env:
   # Project ID — App Hosting tự inject GOOGLE_CLOUD_PROJECT, ta map sang biến của app
