@@ -1,0 +1,35 @@
+# Firebase App Hosting runtime config.
+# Docs: https://firebase.google.com/docs/app-hosting/configure
+runConfig:
+  cpu: 1
+  memoryMiB: 512
+  maxInstances: 5
+  minInstances: 0
+  concurrency: 80
+
+env:
+  # Project ID — App Hosting tự inject GOOGLE_CLOUD_PROJECT, ta map sang biến của app
+  - variable: FIREBASE_PROJECT_ID
+    value: meet-c9a19
+    availability:
+      - BUILD
+      - RUNTIME
+
+  - variable: NODE_ENV
+    value: production
+    availability:
+      - BUILD
+      - RUNTIME
+
+  # Secret — phải tạo trước trong Google Secret Manager:
+  #   gcloud secrets create ANTHROPIC_API_KEY --data-file=- < <(echo -n "$KEY")
+  # Sau đó cấp quyền cho service account App Hosting (xem README mục triển khai).
+  - variable: ANTHROPIC_API_KEY
+    secret: ANTHROPIC_API_KEY
+    availability:
+      - RUNTIME
+
+  # (Tuỳ chọn) override model
+  # - variable: CLAUDE_MODEL
+  #   value: claude-sonnet-4-6
+  #   availability: [RUNTIME]
