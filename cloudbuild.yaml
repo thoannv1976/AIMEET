@@ -1,0 +1,35 @@
+# Build & deploy to Google Cloud Run via Cloud Build.
+# Required substitutions (set in trigger): _SERVICE, _REGION, _PROJECT
+# Required Secret Manager secrets: ANTHROPIC_API_KEY
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - "$_REGION-docker.pkg.dev/$PROJECT_ID/aimeet/$_SERVICE:$SHORT_SHA"
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - "$_REGION-docker.pkg.dev/$PROJECT_ID/aimeet/$_SERVICE:$SHORT_SHA"
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - "$_SERVICE"
+      - "--image=$_REGION-docker.pkg.dev/$PROJECT_ID/aimeet/$_SERVICE:$SHORT_SHA"
+      - "--region=$_REGION"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--set-env-vars=FIREBASE_PROJECT_ID=$PROJECT_ID,NODE_ENV=production"
+      - "--update-secrets=ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest"
+
+substitutions:
+  _SERVICE: aimeet
+  _REGION: asia-southeast1
+
+options:
+  logging: CLOUD_LOGGING_ONLY
