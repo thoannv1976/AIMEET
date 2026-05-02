@@ -13,6 +13,8 @@
 
 Stack: **Next.js 14 (App Router) · TypeScript · TailwindCSS · Firebase Admin · Anthropic Claude · pdfkit · docx**.
 
+> 👉 Mới clone về? Xem [`NEXT_STEPS.md`](./NEXT_STEPS.md) để có hướng dẫn từng bước đưa ứng dụng lên chạy.
+
 ---
 
 ## 1. Cấu trúc thư mục
