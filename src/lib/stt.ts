@@ -8,11 +8,12 @@ function getClient(): SpeechClient {
   return _client;
 }
 
-const ENCODING_MAP: Record<string, "WEBM_OPUS" | "OGG_OPUS" | "MP3" | "FLAC" | "LINEAR16"> = {
+// Map common browser MIME types to the Google STT v1 encoding enum.
+// Anything we don't recognise is left unset so Google can auto-detect from
+// container headers (works for OGG/WEBM/FLAC/WAV).
+const ENCODING_MAP: Record<string, string> = {
   "audio/webm": "WEBM_OPUS",
-  "audio/webm;codecs=opus": "WEBM_OPUS",
   "audio/ogg": "OGG_OPUS",
-  "audio/ogg;codecs=opus": "OGG_OPUS",
   "audio/mpeg": "MP3",
   "audio/mp3": "MP3",
   "audio/flac": "FLAC",
@@ -26,37 +27,27 @@ export async function transcribeAudio(
   mime: string,
   languageCode = "vi-VN",
 ): Promise<string> {
-  const encoding = pickEncoding(mime);
   const client = getClient();
-
-  // Long audio (>60s) must be processed via long-running recognize. We
-  // dispatch by buffer length: ~1 MiB ≈ 1 min of opus audio.
-  const useLongRunning = audio.byteLength > 1_000_000;
+  const encoding = pickEncoding(mime);
 
   const config: any = {
     languageCode,
     enableAutomaticPunctuation: true,
-    model: "latest_long",
-    audioChannelCount: 1,
-    enableSpokenPunctuation: { value: true },
   };
   if (encoding) config.encoding = encoding;
+  // Note: for WEBM_OPUS / OGG_OPUS the sample rate is read from the
+  // container header so we omit sampleRateHertz. For LINEAR16 the WAV
+  // header carries it. We also DO NOT set audioChannelCount — letting
+  // Google match whatever the actual stream contains.
 
-  const request: any = {
-    audio: { content: audio.toString("base64") },
-    config,
-  };
+  const request = { audio: { content: audio.toString("base64") }, config };
 
-  if (useLongRunning) {
-    const [op] = await client.longRunningRecognize(request);
-    const [resp] = await op.promise();
-    return joinResults(resp);
-  }
-  const [resp] = await client.recognize(request);
-  return joinResults(resp);
-}
+  // longRunningRecognize works for everything from a few seconds up to
+  // ~8 hours and avoids the 60-second sync limit. Polling overhead is a
+  // few seconds, which is acceptable in our UX.
+  const [op] = await client.longRunningRecognize(request);
+  const [resp] = await op.promise();
 
-function joinResults(resp: any): string {
   return (resp.results || [])
     .map((r: any) => r.alternatives?.[0]?.transcript || "")
     .filter(Boolean)
@@ -66,8 +57,5 @@ function joinResults(resp: any): string {
 
 function pickEncoding(mime: string): string | undefined {
   const key = mime.toLowerCase().split(";")[0].trim();
-  for (const [k, v] of Object.entries(ENCODING_MAP)) {
-    if (k.split(";")[0] === key) return v;
-  }
-  return undefined; // Let Google auto-detect
+  return ENCODING_MAP[key];
 }

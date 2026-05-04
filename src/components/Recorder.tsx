@@ -9,6 +9,7 @@ declare global {
   interface Window {
     webkitSpeechRecognition?: any;
     SpeechRecognition?: any;
+    webkitAudioContext?: typeof AudioContext;
   }
 }
 
@@ -29,7 +30,6 @@ export default function Recorder({ onTranscript }: Props) {
   const startedAt = useRef<number>(0);
   const [duration, setDuration] = useState(0);
 
-  // Detect browser support for Web Speech API on mount.
   useEffect(() => {
     const SR = (typeof window !== "undefined" &&
       (window.SpeechRecognition || window.webkitSpeechRecognition)) as any;
@@ -67,7 +67,6 @@ export default function Recorder({ onTranscript }: Props) {
     recRef.current = rec;
   }, [lang]);
 
-  // Tick the timer while recording.
   useEffect(() => {
     if (!recording) return;
     const id = setInterval(() => {
@@ -80,24 +79,31 @@ export default function Recorder({ onTranscript }: Props) {
     setUploadError(null);
     setAudioBlob(null);
     setAudioUrl(null);
+    let stream: MediaStream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mr = pickMediaRecorder(stream);
-      audioChunks.current = [];
-      mr.ondataavailable = (e) => e.data.size && audioChunks.current.push(e.data);
-      mr.onstop = () => {
-        const type = mr.mimeType || "audio/webm";
-        const blob = new Blob(audioChunks.current, { type });
-        setAudioBlob(blob);
-        setAudioUrl(URL.createObjectURL(blob));
-        stream.getTracks().forEach((t) => t.stop());
-      };
-      mr.start(1000);
-      mediaRef.current = mr;
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err: any) {
       setUploadError(`Không truy cập được microphone: ${err?.message || err}`);
       return;
     }
+
+    const mr = pickMediaRecorder(stream);
+    audioChunks.current = [];
+    mr.ondataavailable = (e) => {
+      if (e.data && e.data.size) audioChunks.current.push(e.data);
+    };
+    mr.onstop = () => {
+      const type = mr.mimeType || "audio/webm";
+      const blob = new Blob(audioChunks.current, { type });
+      setAudioBlob(blob);
+      setAudioUrl(URL.createObjectURL(blob));
+      stream.getTracks().forEach((t) => t.stop());
+    };
+    // No timeslice — emit a single complete blob on stop. Avoids the
+    // "missing trailing frames" issue we saw with iOS Safari when using
+    // mr.start(1000).
+    mr.start();
+    mediaRef.current = mr;
 
     if (recRef.current) {
       recRef.current._wantOn = true;
@@ -117,9 +123,15 @@ export default function Recorder({ onTranscript }: Props) {
         recRef.current.stop();
       } catch {}
     }
-    if (mediaRef.current && mediaRef.current.state !== "inactive") {
+    const mr = mediaRef.current;
+    if (mr && mr.state !== "inactive") {
+      // Force any buffered audio to be emitted before we stop, so the
+      // final ondataavailable contains the trailing frames.
       try {
-        mediaRef.current.stop();
+        (mr as any).requestData?.();
+      } catch {}
+      try {
+        mr.stop();
       } catch {}
     }
     setRecording(false);
@@ -140,17 +152,32 @@ export default function Recorder({ onTranscript }: Props) {
     setUploading(true);
     setUploadError(null);
     try {
+      // Convert recorded audio to mono 16 kHz WAV in the browser. WAV
+      // (LINEAR16) is the format Google STT decodes most reliably across
+      // every input codec — including iOS Safari's audio/mp4/AAC, which
+      // Google Speech v1 cannot decode directly.
+      const wav = await encodeBlobToWav(audioBlob, 16000);
       const form = new FormData();
-      form.append("audio", audioBlob, `recording.${(audioBlob.type.split("/")[1] || "webm").split(";")[0]}`);
+      form.append("audio", wav, "recording.wav");
+
       const r = await fetch(`/api/transcribe?lang=${encodeURIComponent(lang)}`, {
         method: "POST",
         body: form,
       });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
-      const t = (data.transcript || "").trim();
-      if (!t) throw new Error("Không nhận dạng được nội dung. Hãy thử ghi âm rõ hơn.");
-      const merged = text ? `${text}\n${t}` : t;
+      const raw = await r.text();
+      let data: any = null;
+      try {
+        data = raw ? JSON.parse(raw) : null;
+      } catch {}
+      if (!r.ok) {
+        const detail = data?.detail ? ` — ${data.detail}` : "";
+        throw new Error((data?.error || `HTTP ${r.status}`) + detail);
+      }
+      const t = (data?.transcript || "").trim();
+      if (!t) {
+        throw new Error("Không nhận dạng được nội dung. Hãy ghi âm gần micro hơn hoặc nói rõ hơn.");
+      }
+      const merged = text.trim() ? `${text.trim()}\n${t}` : t;
       setText(merged);
       onTranscript(merged);
     } catch (e: any) {
@@ -247,7 +274,7 @@ export default function Recorder({ onTranscript }: Props) {
             </a>
           </div>
           {uploadError && (
-            <p className="text-sm text-red-600">⚠ {uploadError}</p>
+            <p className="text-sm text-red-600 break-words">⚠ {uploadError}</p>
           )}
         </div>
       )}
@@ -277,4 +304,71 @@ function formatDuration(s: number): string {
   const m = Math.floor(s / 60);
   const ss = (s % 60).toString().padStart(2, "0");
   return `${m}:${ss}`;
+}
+
+// Decode any audio Blob via WebAudio and re-encode as mono 16-bit PCM WAV
+// at the requested sample rate. Works for webm/opus, ogg/opus, audio/mp4
+// (Safari iOS), audio/mpeg, etc. — anything the browser can decode.
+async function encodeBlobToWav(blob: Blob, targetRate = 16000): Promise<Blob> {
+  const arrayBuffer = await blob.arrayBuffer();
+  const Ctx: typeof AudioContext =
+    (window.AudioContext || window.webkitAudioContext) as any;
+  if (!Ctx) throw new Error("Trình duyệt không hỗ trợ Web Audio API.");
+  const audioCtx = new Ctx();
+  let decoded: AudioBuffer;
+  try {
+    // Some browsers reject ArrayBuffer aliasing — pass a copy.
+    decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+  } catch (e: any) {
+    throw new Error("Không decode được audio: " + (e?.message || e));
+  } finally {
+    try {
+      audioCtx.close();
+    } catch {}
+  }
+
+  // Resample to mono 16 kHz using OfflineAudioContext.
+  const length = Math.max(1, Math.ceil(decoded.duration * targetRate));
+  const offline = new OfflineAudioContext(1, length, targetRate);
+  const src = offline.createBufferSource();
+  src.buffer = decoded;
+  src.connect(offline.destination);
+  src.start(0);
+  const rendered = await offline.startRendering();
+
+  const samples = rendered.getChannelData(0);
+  return wavBlobFromSamples(samples, targetRate);
+}
+
+function wavBlobFromSamples(samples: Float32Array, sampleRate: number): Blob {
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const blockAlign = (numChannels * bitsPerSample) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = samples.length * blockAlign;
+  const buf = new ArrayBuffer(44 + dataSize);
+  const v = new DataView(buf);
+  let p = 0;
+  const writeStr = (s: string) => {
+    for (let i = 0; i < s.length; i++) v.setUint8(p++, s.charCodeAt(i));
+  };
+  writeStr("RIFF");
+  v.setUint32(p, 36 + dataSize, true); p += 4;
+  writeStr("WAVE");
+  writeStr("fmt ");
+  v.setUint32(p, 16, true); p += 4;
+  v.setUint16(p, 1, true); p += 2;
+  v.setUint16(p, numChannels, true); p += 2;
+  v.setUint32(p, sampleRate, true); p += 4;
+  v.setUint32(p, byteRate, true); p += 4;
+  v.setUint16(p, blockAlign, true); p += 2;
+  v.setUint16(p, bitsPerSample, true); p += 2;
+  writeStr("data");
+  v.setUint32(p, dataSize, true); p += 4;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    p += 2;
+  }
+  return new Blob([buf], { type: "audio/wav" });
 }
