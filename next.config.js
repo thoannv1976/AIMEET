@@ -4,7 +4,7 @@ const path = require("path");
 const nextConfig = {
   output: "standalone",
   experimental: {
-    serverComponentsExternalPackages: ["firebase-admin", "pdfkit"],
+    serverComponentsExternalPackages: ["firebase-admin", "pdfkit", "@google-cloud/speech"],
   },
   // Belt-and-suspenders: also register the @/* alias at the webpack level
   // so resolution works under buildpacks that may not pick up tsconfig paths.

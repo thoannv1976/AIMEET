@@ -167,7 +167,8 @@ export default function TaskItem({
           type="checkbox"
           checked={task.status === "done"}
           onChange={(e) => patch({ status: e.target.checked ? "done" : "todo", progress: e.target.checked ? 100 : task.progress })}
-          className="mt-1 w-5 h-5"
+          className="mt-1 w-6 h-6 accent-brand-600 cursor-pointer shrink-0"
+          aria-label="Đánh dấu hoàn thành"
         />
         <div className="flex-1">
           <div className="flex items-start justify-between gap-2">
@@ -176,10 +177,10 @@ export default function TaskItem({
               {task.description && <p className="text-sm text-slate-600 mt-1">{task.description}</p>}
             </div>
             <div className="flex gap-1 shrink-0">
-              <button className="btn-secondary !px-2 !py-1 text-xs" onClick={() => setEditing(true)}>
+              <button className="btn-secondary !px-3 !py-1.5 text-xs" onClick={() => setEditing(true)}>
                 Sửa
               </button>
-              <button className="btn-secondary !px-2 !py-1 text-xs text-red-600" onClick={onDelete}>
+              <button className="btn-secondary !px-3 !py-1.5 text-xs text-red-600" onClick={onDelete}>
                 Xoá
               </button>
             </div>

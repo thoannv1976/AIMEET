@@ -9,14 +9,23 @@
 html, body {
   background: var(--bg);
   color: #0f172a;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Avoid iOS Safari zooming when an input is focused (font < 16px triggers zoom). */
+@media (max-width: 640px) {
+  .input, input, textarea, select {
+    font-size: 16px !important;
+  }
 }
 
 .btn {
-  @apply inline-flex items-center justify-center px-3 py-2 rounded-md text-sm font-medium transition-colors;
+  @apply inline-flex items-center justify-center px-3 py-2 rounded-md text-sm font-medium transition-colors min-h-[40px];
 }
-.btn-primary { @apply btn bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50; }
-.btn-secondary { @apply btn bg-white border border-slate-300 text-slate-800 hover:bg-slate-50; }
-.btn-danger { @apply btn bg-red-600 text-white hover:bg-red-700; }
+.btn-primary { @apply btn bg-brand-600 text-white hover:bg-brand-700 active:bg-brand-700 disabled:opacity-50; }
+.btn-secondary { @apply btn bg-white border border-slate-300 text-slate-800 hover:bg-slate-50 active:bg-slate-100; }
+.btn-danger { @apply btn bg-red-600 text-white hover:bg-red-700 active:bg-red-700; }
 .card { @apply bg-white rounded-lg border border-slate-200 shadow-sm; }
 .label { @apply block text-xs font-medium text-slate-600 mb-1; }
 .input { @apply w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-brand-500; }

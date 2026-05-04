@@ -80,7 +80,7 @@ export default function HomePage() {
       </section>
 
       {stats && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-3 md:grid-cols-5 gap-2 md:gap-3">
           <Stat label="Tổng" value={stats.total} color="bg-slate-100" />
           <Stat label="Chưa làm" value={stats.todo} color="bg-slate-100" />
           <Stat label="Đang làm" value={stats.in_progress} color="bg-blue-100" />
@@ -89,7 +89,7 @@ export default function HomePage() {
         </div>
       )}
 
-      <section className="card p-4">
+      <section className="card p-3 sm:p-4">
         <label className="label">Tiêu đề cuộc họp</label>
         <input
           className="input mb-3"
@@ -98,11 +98,15 @@ export default function HomePage() {
           placeholder="VD: Họp giao ban thứ 2..."
         />
         <Recorder onTranscript={setTranscript} />
-        <div className="flex justify-end mt-3 gap-2">
-          <a href="/tasks" className="btn-secondary">
+        <div className="flex flex-col sm:flex-row sm:justify-end mt-3 gap-2">
+          <a href="/tasks" className="btn-secondary order-2 sm:order-1">
             Xem danh sách công việc
           </a>
-          <button className="btn-primary" onClick={processMeeting} disabled={busy || !transcript.trim()}>
+          <button
+            className="btn-primary order-1 sm:order-2"
+            onClick={processMeeting}
+            disabled={busy || !transcript.trim()}
+          >
             {busy ? "Đang xử lý bằng AI..." : "🪄 Tạo công việc bằng AI"}
           </button>
         </div>
