@@ -1,16 +1,29 @@
-import { SpeechClient } from "@google-cloud/speech";
+import speech, { v1, v2 } from "@google-cloud/speech";
 
-let _client: SpeechClient | null = null;
+const V2_LOCATION = process.env.STT_V2_LOCATION || "asia-southeast1";
+const V2_MODEL = process.env.STT_V2_MODEL || "chirp_2";
 
-function getClient(): SpeechClient {
-  if (_client) return _client;
-  _client = new SpeechClient();
-  return _client;
+let _v1: v1.SpeechClient | null = null;
+let _v2: v2.SpeechClient | null = null;
+
+function getV1(): v1.SpeechClient {
+  if (_v1) return _v1;
+  _v1 = new speech.SpeechClient();
+  return _v1;
 }
 
-// Map common browser MIME types to the Google STT v1 encoding enum.
-// Anything we don't recognise is left unset so Google can auto-detect from
-// container headers (works for OGG/WEBM/FLAC/WAV).
+function getV2(): v2.SpeechClient {
+  if (_v2) return _v2;
+  // v2 endpoints are region-pinned. Using the regional endpoint is required
+  // when calling a recognizer in that region (e.g. chirp_2 in asia-southeast1).
+  const apiEndpoint =
+    V2_LOCATION === "global"
+      ? "speech.googleapis.com"
+      : `${V2_LOCATION}-speech.googleapis.com`;
+  _v2 = new speech.v2.SpeechClient({ apiEndpoint });
+  return _v2;
+}
+
 const ENCODING_MAP: Record<string, string> = {
   "audio/webm": "WEBM_OPUS",
   "audio/ogg": "OGG_OPUS",
@@ -22,32 +35,16 @@ const ENCODING_MAP: Record<string, string> = {
   "audio/x-wav": "LINEAR16",
 };
 
-export async function transcribeAudio(
-  audio: Buffer,
-  mime: string,
-  languageCode = "vi-VN",
-): Promise<string> {
-  const client = getClient();
-  const encoding = pickEncoding(mime);
+function getProjectId(): string {
+  const id =
+    process.env.FIREBASE_PROJECT_ID ||
+    process.env.GOOGLE_CLOUD_PROJECT ||
+    process.env.GCLOUD_PROJECT;
+  if (!id) throw new Error("FIREBASE_PROJECT_ID is not set");
+  return id;
+}
 
-  const config: any = {
-    languageCode,
-    enableAutomaticPunctuation: true,
-  };
-  if (encoding) config.encoding = encoding;
-  // Note: for WEBM_OPUS / OGG_OPUS the sample rate is read from the
-  // container header so we omit sampleRateHertz. For LINEAR16 the WAV
-  // header carries it. We also DO NOT set audioChannelCount — letting
-  // Google match whatever the actual stream contains.
-
-  const request = { audio: { content: audio.toString("base64") }, config };
-
-  // longRunningRecognize works for everything from a few seconds up to
-  // ~8 hours and avoids the 60-second sync limit. Polling overhead is a
-  // few seconds, which is acceptable in our UX.
-  const [op] = await client.longRunningRecognize(request);
-  const [resp] = await op.promise();
-
+function joinResults(resp: any): string {
   return (resp.results || [])
     .map((r: any) => r.alternatives?.[0]?.transcript || "")
     .filter(Boolean)
@@ -55,7 +52,72 @@ export async function transcribeAudio(
     .trim();
 }
 
+async function transcribeWithV2(
+  audio: Buffer,
+  languageCode: string,
+): Promise<string> {
+  const client = getV2();
+  const projectId = getProjectId();
+  const request: any = {
+    recognizer: `projects/${projectId}/locations/${V2_LOCATION}/recognizers/_`,
+    config: {
+      autoDecodingConfig: {},
+      languageCodes: [languageCode],
+      model: V2_MODEL,
+      features: { enableAutomaticPunctuation: true },
+    },
+    content: audio.toString("base64"),
+  };
+  const [response] = await client.recognize(request);
+  return joinResults(response);
+}
+
+async function transcribeWithV1(
+  audio: Buffer,
+  mime: string,
+  languageCode: string,
+): Promise<string> {
+  const client = getV1();
+  const encoding = pickEncoding(mime);
+  const config: any = {
+    languageCode,
+    enableAutomaticPunctuation: true,
+    model: "latest_long",
+    useEnhanced: true,
+  };
+  if (encoding) config.encoding = encoding;
+  const request = { audio: { content: audio.toString("base64") }, config };
+  const [op] = await client.longRunningRecognize(request);
+  const [response] = await op.promise();
+  return joinResults(response);
+}
+
 function pickEncoding(mime: string): string | undefined {
   const key = mime.toLowerCase().split(";")[0].trim();
   return ENCODING_MAP[key];
+}
+
+// v2 sync recognize accepts inline audio up to ~10 MiB / ~60 s. We use ~2 MiB
+// (~62 s of 16-kHz 16-bit mono LINEAR16) as a safe threshold.
+const V2_INLINE_LIMIT_BYTES = 2_000_000;
+
+export async function transcribeAudio(
+  audio: Buffer,
+  mime: string,
+  languageCode = "vi-VN",
+): Promise<string> {
+  const eligibleForV2 = audio.byteLength <= V2_INLINE_LIMIT_BYTES;
+
+  if (eligibleForV2) {
+    try {
+      const text = await transcribeWithV2(audio, languageCode);
+      if (text) return text;
+      // chirp_2 returned no results — fall through to v1 in case the audio
+      // was just below the model's confidence threshold.
+    } catch (e: any) {
+      // Region/model not enabled, quota, etc. — degrade gracefully.
+      console.warn("[stt] v2 chirp_2 failed, falling back to v1:", e?.message || e);
+    }
+  }
+  return transcribeWithV1(audio, mime, languageCode);
 }

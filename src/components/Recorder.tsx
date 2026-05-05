@@ -13,6 +13,12 @@ declare global {
   }
 }
 
+// How often to run the cumulative live-transcription loop (ms). The actual
+// upload+inference takes ~3-8s on chirp_2, so we space requests to avoid
+// stacking. The first poll fires after this delay (i.e. nothing happens
+// during the first 9s of recording).
+const LIVE_INTERVAL_MS = 9000;
+
 export default function Recorder({ onTranscript }: Props) {
   const [supportsLiveSTT, setSupportsLiveSTT] = useState<boolean | null>(null);
   const [recording, setRecording] = useState(false);
@@ -23,11 +29,14 @@ export default function Recorder({ onTranscript }: Props) {
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [livePending, setLivePending] = useState(false);
 
   const recRef = useRef<any>(null);
   const mediaRef = useRef<MediaRecorder | null>(null);
   const audioChunks = useRef<Blob[]>([]);
   const startedAt = useRef<number>(0);
+  const liveLoopActive = useRef<boolean>(false);
+  const liveBaseText = useRef<string>("");
   const [duration, setDuration] = useState(0);
 
   useEffect(() => {
@@ -79,9 +88,21 @@ export default function Recorder({ onTranscript }: Props) {
     setUploadError(null);
     setAudioBlob(null);
     setAudioUrl(null);
+
     let stream: MediaStream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          // Browser-side cleanup helps STT enormously, especially on phones.
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          // Browsers may ignore this hint; we always re-encode to 16 kHz
+          // before sending to STT, so this is just an upper bound.
+          sampleRate: 48000,
+        } as MediaTrackConstraints,
+      });
     } catch (err: any) {
       setUploadError(`Không truy cập được microphone: ${err?.message || err}`);
       return;
@@ -99,10 +120,11 @@ export default function Recorder({ onTranscript }: Props) {
       setAudioUrl(URL.createObjectURL(blob));
       stream.getTracks().forEach((t) => t.stop());
     };
-    // No timeslice — emit a single complete blob on stop. Avoids the
-    // "missing trailing frames" issue we saw with iOS Safari when using
-    // mr.start(1000).
-    mr.start();
+    // We need data emissions during recording so the live-STT loop can read
+    // a partial blob, but we still want a complete final blob on stop. A
+    // 1-second timeslice does both (each chunk is a valid container fragment;
+    // concatenated they form a valid file).
+    mr.start(supportsLiveSTT ? undefined : 1000);
     mediaRef.current = mr;
 
     if (recRef.current) {
@@ -114,9 +136,19 @@ export default function Recorder({ onTranscript }: Props) {
     startedAt.current = Date.now();
     setDuration(0);
     setRecording(true);
+
+    // If the browser has no Web Speech API (iOS Safari, Firefox), kick off a
+    // background loop that periodically uploads the audio so far and shows
+    // the latest transcript — giving live-feel feedback.
+    if (supportsLiveSTT === false) {
+      liveBaseText.current = text; // preserve any text typed/pasted before
+      liveLoopActive.current = true;
+      runLiveLoop().catch(() => {});
+    }
   }
 
   function stop() {
+    liveLoopActive.current = false;
     if (recRef.current) {
       recRef.current._wantOn = false;
       try {
@@ -125,8 +157,6 @@ export default function Recorder({ onTranscript }: Props) {
     }
     const mr = mediaRef.current;
     if (mr && mr.state !== "inactive") {
-      // Force any buffered audio to be emitted before we stop, so the
-      // final ondataavailable contains the trailing frames.
       try {
         (mr as any).requestData?.();
       } catch {}
@@ -145,6 +175,62 @@ export default function Recorder({ onTranscript }: Props) {
     setAudioUrl(null);
     setUploadError(null);
     setDuration(0);
+    liveBaseText.current = "";
+  }
+
+  // Cumulative live STT: every LIVE_INTERVAL_MS, snapshot the audio so far,
+  // encode to WAV, upload, replace the live-portion of the textarea with
+  // whatever the server returns. We always re-send the full audio so the
+  // model has full context (Google STT does not stitch chunks well).
+  async function runLiveLoop() {
+    let lastFireAt = Date.now();
+    while (liveLoopActive.current) {
+      const elapsed = Date.now() - lastFireAt;
+      const wait = Math.max(200, LIVE_INTERVAL_MS - elapsed);
+      await sleep(wait);
+      if (!liveLoopActive.current) break;
+      lastFireAt = Date.now();
+
+      const mr = mediaRef.current;
+      if (!mr || mr.state === "inactive") continue;
+      if (audioChunks.current.length === 0) continue;
+
+      // Ask MediaRecorder to flush the latest buffered frames into a chunk.
+      try {
+        (mr as any).requestData?.();
+      } catch {}
+      // Give the dataavailable event a moment to land.
+      await sleep(150);
+
+      const snapshot = audioChunks.current.slice();
+      if (snapshot.length === 0) continue;
+      const blob = new Blob(snapshot, { type: mr.mimeType || "audio/webm" });
+
+      try {
+        setLivePending(true);
+        const wav = await encodeBlobToWav(blob, 16000);
+        const form = new FormData();
+        form.append("audio", wav, "live.wav");
+        const r = await fetch(`/api/transcribe?lang=${encodeURIComponent(lang)}`, {
+          method: "POST",
+          body: form,
+        });
+        if (!r.ok) continue;
+        const data = await r.json().catch(() => null);
+        const transcript = (data?.transcript || "").trim();
+        if (!transcript) continue;
+        const merged = liveBaseText.current.trim()
+          ? `${liveBaseText.current.trim()}\n${transcript}`
+          : transcript;
+        setText(merged);
+        onTranscript(merged);
+      } catch {
+        // Swallow — best-effort live mode. Final transcribe button will
+        // give the canonical result on stop.
+      } finally {
+        setLivePending(false);
+      }
+    }
   }
 
   async function transcribeOnServer() {
@@ -152,10 +238,6 @@ export default function Recorder({ onTranscript }: Props) {
     setUploading(true);
     setUploadError(null);
     try {
-      // Convert recorded audio to mono 16 kHz WAV in the browser. WAV
-      // (LINEAR16) is the format Google STT decodes most reliably across
-      // every input codec — including iOS Safari's audio/mp4/AAC, which
-      // Google Speech v1 cannot decode directly.
       const wav = await encodeBlobToWav(audioBlob, 16000);
       const form = new FormData();
       form.append("audio", wav, "recording.wav");
@@ -177,7 +259,9 @@ export default function Recorder({ onTranscript }: Props) {
       if (!t) {
         throw new Error("Không nhận dạng được nội dung. Hãy ghi âm gần micro hơn hoặc nói rõ hơn.");
       }
-      const merged = text.trim() ? `${text.trim()}\n${t}` : t;
+      // Replace any live-loop text with the high-quality final result.
+      const base = liveBaseText.current.trim();
+      const merged = base ? `${base}\n${t}` : t;
       setText(merged);
       onTranscript(merged);
     } catch (e: any) {
@@ -210,6 +294,7 @@ export default function Recorder({ onTranscript }: Props) {
             <span className="inline-flex items-center gap-1 text-red-600 text-sm font-mono tabular-nums">
               <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse" />
               {formatDuration(duration)}
+              {livePending && <span className="ml-2 text-slate-500 text-xs">đang nhận dạng…</span>}
             </span>
           )}
           {!recording ? (
@@ -229,9 +314,10 @@ export default function Recorder({ onTranscript }: Props) {
 
       {supportsLiveSTT === false && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded p-2 mb-3">
-          Trình duyệt không hỗ trợ chuyển giọng nói thành văn bản trực tiếp (Safari iOS / Firefox).
-          Bạn vẫn có thể <strong>ghi âm bình thường</strong> rồi bấm <em>"Chuyển audio thành văn bản"</em>{" "}
-          để server xử lý bằng Google Cloud Speech-to-Text.
+          Trình duyệt không hỗ trợ chuyển giọng nói thành văn bản trực tiếp.
+          App sẽ <strong>tự động cập nhật</strong> transcript mỗi vài giây trong khi bạn ghi
+          âm bằng Google Cloud Speech-to-Text. Khi bấm <em>Dừng</em>, có thể bấm
+          <em> "Chuyển audio → văn bản"</em> để chạy lại lần cuối với chất lượng cao nhất.
         </div>
       )}
 
@@ -244,6 +330,9 @@ export default function Recorder({ onTranscript }: Props) {
             setText(e.target.value);
             setInterim("");
             onTranscript(e.target.value);
+            // User typed manually — abandon the live-base anchor so future
+            // live updates don't overwrite their edit.
+            liveBaseText.current = e.target.value;
           }}
           placeholder="Bắt đầu ghi để nhận dạng giọng nói, hoặc dán transcript có sẵn vào đây..."
         />
@@ -306,9 +395,10 @@ function formatDuration(s: number): string {
   return `${m}:${ss}`;
 }
 
-// Decode any audio Blob via WebAudio and re-encode as mono 16-bit PCM WAV
-// at the requested sample rate. Works for webm/opus, ogg/opus, audio/mp4
-// (Safari iOS), audio/mpeg, etc. — anything the browser can decode.
+function sleep(ms: number) {
+  return new Promise<void>((r) => setTimeout(r, ms));
+}
+
 async function encodeBlobToWav(blob: Blob, targetRate = 16000): Promise<Blob> {
   const arrayBuffer = await blob.arrayBuffer();
   const Ctx: typeof AudioContext =
@@ -317,7 +407,6 @@ async function encodeBlobToWav(blob: Blob, targetRate = 16000): Promise<Blob> {
   const audioCtx = new Ctx();
   let decoded: AudioBuffer;
   try {
-    // Some browsers reject ArrayBuffer aliasing — pass a copy.
     decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
   } catch (e: any) {
     throw new Error("Không decode được audio: " + (e?.message || e));
@@ -327,7 +416,6 @@ async function encodeBlobToWav(blob: Blob, targetRate = 16000): Promise<Blob> {
     } catch {}
   }
 
-  // Resample to mono 16 kHz using OfflineAudioContext.
   const length = Math.max(1, Math.ceil(decoded.duration * targetRate));
   const offline = new OfflineAudioContext(1, length, targetRate);
   const src = offline.createBufferSource();
