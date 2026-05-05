@@ -30,6 +30,7 @@ export default function Recorder({ onTranscript }: Props) {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [livePending, setLivePending] = useState(false);
+  const [polishing, setPolishing] = useState(false);
 
   const recRef = useRef<any>(null);
   const mediaRef = useRef<MediaRecorder | null>(null);
@@ -211,10 +212,12 @@ export default function Recorder({ onTranscript }: Props) {
         const wav = await encodeBlobToWav(blob, 16000);
         const form = new FormData();
         form.append("audio", wav, "live.wav");
-        const r = await fetch(`/api/transcribe?lang=${encodeURIComponent(lang)}`, {
-          method: "POST",
-          body: form,
-        });
+        // Skip Claude polish in live mode — it adds 2-4s and the user gets
+        // a high-quality polished pass when they press the final button.
+        const r = await fetch(
+          `/api/transcribe?lang=${encodeURIComponent(lang)}&polish=0`,
+          { method: "POST", body: form },
+        );
         if (!r.ok) continue;
         const data = await r.json().catch(() => null);
         const transcript = (data?.transcript || "").trim();
@@ -233,6 +236,32 @@ export default function Recorder({ onTranscript }: Props) {
     }
   }
 
+  async function polishCurrentText() {
+    const t = text.trim();
+    if (!t || polishing) return;
+    setPolishing(true);
+    setUploadError(null);
+    try {
+      const r = await fetch("/api/polish", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: t }),
+      });
+      const data = await r.json().catch(() => null);
+      if (!r.ok) throw new Error(data?.error || `HTTP ${r.status}`);
+      const polished = (data?.polished || "").trim();
+      if (polished && polished !== t) {
+        setText(polished);
+        onTranscript(polished);
+        liveBaseText.current = polished;
+      }
+    } catch (e: any) {
+      setUploadError("Sửa lỗi bằng AI thất bại: " + (e?.message || e));
+    } finally {
+      setPolishing(false);
+    }
+  }
+
   async function transcribeOnServer() {
     if (!audioBlob) return;
     setUploading(true);
@@ -241,6 +270,13 @@ export default function Recorder({ onTranscript }: Props) {
       const wav = await encodeBlobToWav(audioBlob, 16000);
       const form = new FormData();
       form.append("audio", wav, "recording.wav");
+      // Hint = whatever was in the textarea AFTER recording started (most
+      // commonly the live Web Speech transcript on desktop, or the live STT
+      // result on mobile). Claude uses it as supplementary context to fix
+      // proper nouns / technical terms that one engine got right but the
+      // other missed.
+      const hint = text.replace(liveBaseText.current, "").trim() || text.trim();
+      if (hint) form.append("hint", hint);
 
       const r = await fetch(`/api/transcribe?lang=${encodeURIComponent(lang)}`, {
         method: "POST",
@@ -322,7 +358,20 @@ export default function Recorder({ onTranscript }: Props) {
       )}
 
       <div>
-        <label className="label">Transcript (có thể chỉnh sửa)</label>
+        <div className="flex items-center justify-between mb-1">
+          <label className="label !mb-0">Transcript (có thể chỉnh sửa)</label>
+          {text.trim() && !recording && (
+            <button
+              type="button"
+              className="btn-secondary !px-2 !py-1 text-xs"
+              onClick={polishCurrentText}
+              disabled={polishing}
+              title="Dùng Claude để sửa lỗi chính tả + dấu câu trong transcript hiện tại"
+            >
+              {polishing ? "✨ Đang sửa…" : "✨ Sửa lỗi bằng AI"}
+            </button>
+          )}
+        </div>
         <textarea
           className="input min-h-[160px] sm:min-h-[180px] font-mono text-sm"
           value={text + (interim ? ` ${interim}` : "")}
